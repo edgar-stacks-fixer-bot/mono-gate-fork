@@ -23,7 +23,11 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read # checkout of dev only; every GitHub write uses the review gate app token
-      id-token: write # OIDC exchange for the AWS role that signs the review gate App JWT with its KMS key
+    env:
+      AWS_ENDPOINT_URL: http://localhost:4566
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -31,17 +35,31 @@ jobs:
 
       - uses: $/.github/actions/setup-tools
 
-      - name: aws-credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
+      - name: floci-kms
+        run: |
+          docker run -d --name floci -p 4566:4566 floci/floci:latest
+          for attempt in $(seq 1 30); do
+            aws kms list-keys > /dev/null 2>&1 && break
+            sleep 2
+          done
+          aws kms list-keys > /dev/null
+
+      - name: import-app-key
+        id: kms
+        env:
+          APP_PRIVATE_KEY: ${{ secrets.REVIEW_GATE_APP_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$APP_PRIVATE_KEY" > "$RUNNER_TEMP/app.pem"
+          key_id=$(node .github/test/import-kms-key.mjs "$RUNNER_TEMP/app.pem" --self-test)
+          rm "$RUNNER_TEMP/app.pem"
+          echo "key-id=$key_id" >> "$GITHUB_OUTPUT"
 
       - name: app-token
         id: app-token
         env:
           APP_CLIENT_ID: ${{ vars.REVIEW_GATE_APP_CLIENT_ID }}
-          KMS_KEY_ID: ${{ vars.REVIEW_GATE_APP_KMS_KEY_ID }}
+          KMS_KEY_ID: ${{ steps.kms.outputs.key-id }}
         run: pnpm lt review-gate app-token create --client-id "$APP_CLIENT_ID" --kms-key-id "$KMS_KEY_ID"
 
       - name: check-dispatched-pull-request
@@ -56,3 +74,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: pnpm lt review-gate app-token revoke
+
+      - name: assert-token-revoked
+        if: always() && steps.app-token.outputs.token != ''
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H "authorization: Bearer $GITHUB_TOKEN" https://api.github.com/installation/repositories)
+          echo "installation token status after revoke: $code"
+          test "$code" = "401"

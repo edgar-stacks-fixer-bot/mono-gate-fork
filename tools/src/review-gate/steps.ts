@@ -18,7 +18,7 @@ import type { PullRequest } from './schemas.js';
 const gateContext = 'review-gate';
 const protectedBaseBranch = 'dev';
 const requiredApprovals = 2;
-const reviewersTeamId = 19686212;
+const reviewersTeamId = 20744231;
 const appTokenPermissions: TokenPermissions = {
   actions: 'read',
   members: 'read',
